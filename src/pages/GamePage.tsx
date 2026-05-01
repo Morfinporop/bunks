@@ -9,37 +9,6 @@ export default function GamePage() {
   const { room } = useGame();
 
   useEffect(() => {
-    // Light ambient melody while on game screen
-    const AC = (window as any).AudioContext || (window as any).webkitAudioContext;
-    if (!AC) return;
-    const ctx = new AC();
-    let active = true;
-    const notes = [220, 246.94, 293.66, 329.63];
-    let idx = 0;
-    const tick = setInterval(() => {
-      if (!active) return;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = notes[idx % notes.length];
-      gain.gain.value = 0.0001;
-      gain.gain.exponentialRampToValueAtTime(0.02, ctx.currentTime + 0.04);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.36);
-      idx += 1;
-    }, 900);
-
-    return () => {
-      active = false;
-      clearInterval(tick);
-      ctx.close();
-    };
-  }, []);
-
-  useEffect(() => {
     if (!room) {
       navigate('/');
     } else if (room.phase === 'lobby') {

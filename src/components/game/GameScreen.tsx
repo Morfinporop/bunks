@@ -207,7 +207,7 @@ function VotingBlock() {
 }
 
 export default function GameScreen() {
-  const { room, isHost, myPlayerId, playerRevealCard, playerHideCard } = useGame();
+  const { room, isHost, myPlayerId, playerRevealCard, playerHideCard, endTurn, funAction } = useGame();
   if (!room) return null;
   const me = room.players.find((p) => p.id === myPlayerId);
   const { pick } = useSeeded(room.code);
@@ -235,6 +235,19 @@ export default function GameScreen() {
   const size = 120 + ((pick([1, 2, 3, 4], 3) as number) * 24);
   const years = 1 + ((pick([1, 2, 3, 4], 7) as number));
   const months = (pick([0, 3, 6, 9], 2) as number);
+  const [funTarget, setFunTarget] = useState('');
+  const funActions = ['Закидать говном', 'Крикнуть: ты не пройдешь в бункер', 'Устроить абсурдный допрос', 'Потребовать раскрыть фобию', 'Обвинить в симуляции'];
+
+  const handleEndTurn = async () => {
+    const res = await endTurn();
+    if (res?.error) alert(res.error);
+  };
+
+  const runFunAction = async (text: string) => {
+    if (!funTarget) return alert('Выберите цель для действия');
+    const res = await funAction(funTarget, text);
+    if (res?.error) alert(res.error);
+  };
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: isHost ? '280px 1fr' : '1fr', gap: 16, paddingBottom: room.timerEndAt ? 80 : 20 }}>
@@ -312,6 +325,29 @@ export default function GameScreen() {
               </tbody>
             </table>
           )}
+          {room.phase === 'game' && room.currentSpeaker === myPlayerId && (
+            <div style={{ padding: 12, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+              <button className="btn btn-accent" style={{ padding: '8px 12px', fontSize: 13 }} onClick={handleEndTurn}>
+                Завершить ход
+              </button>
+              <span style={{ marginLeft: 10, fontSize: 12, color: '#aaa' }}>Откройте Профессию и ещё одну карту перед завершением</span>
+            </div>
+          )}
+        </div>
+
+        <div className="glass" style={{ borderRadius: 12, padding: 12, marginBottom: 12 }}>
+          <div style={{ marginBottom: 8, fontWeight: 700 }}>Доп. возможности (веселые)</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 8 }}>
+            <select className="input" style={{ padding: 8, fontSize: 12 }} value={funTarget} onChange={(e) => setFunTarget(e.target.value)}>
+              <option value="">Выберите игрока</option>
+              {room.players.filter((p) => p.id !== myPlayerId).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {funActions.map((a) => (
+                <button key={a} className="btn btn-primary" style={{ padding: '6px 10px', fontSize: 12 }} onClick={() => runFunAction(a)}>{a}</button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="glass" style={{ borderRadius: 12, overflow: 'hidden' }}>
@@ -326,7 +362,9 @@ export default function GameScreen() {
             <tbody>
               {room.players.map((p, i) => (
                 <tr key={p.id} style={{ borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.05)', background: p.id === myPlayerId ? 'rgba(212,175,55,0.06)' : 'transparent' }}>
-                  <td style={{ padding: 10, fontWeight: 600 }}>{p.name}{p.id === myPlayerId ? ' (вы)' : ''}</td>
+                  <td style={{ padding: 10, fontWeight: 600, textDecoration: p.isEliminated ? 'line-through' : 'none', textDecorationColor: '#111', color: p.isEliminated ? '#777' : '#fff' }}>
+                    {p.name}{p.id === myPlayerId ? ' (вы)' : ''}
+                  </td>
                   {CARD_ORDER.map((k) => {
                     const c = p.cards ? (p.cards as PlayerCards)[k] : null;
                     return <td key={k} style={{ padding: 10, color: c?.revealed ? '#fff' : '#666' }}>{c?.revealed ? c.value : '???'}</td>;
@@ -338,6 +376,19 @@ export default function GameScreen() {
         </div>
 
         <VotingBlock />
+
+        {room.gameLog?.length > 0 && (
+          <div className="glass" style={{ borderRadius: 12, marginTop: 12, padding: 12 }}>
+            <div style={{ marginBottom: 8, fontWeight: 700 }}>События</div>
+            <div style={{ maxHeight: 160, overflowY: 'auto', display: 'grid', gap: 6 }}>
+              {[...room.gameLog].slice(-12).reverse().map((l, i) => (
+                <div key={i} style={{ fontSize: 12, color: '#aaa' }}>
+                  {new Date(l.time).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })} — {l.message}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

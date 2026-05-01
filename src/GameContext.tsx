@@ -28,6 +28,7 @@ interface GameContextType {
 
   // Host actions
   startGame: (force?: boolean) => Promise<{ error?: string }>;
+  endTurn: () => Promise<{ error?: string }>;
   nextPhase: () => Promise<{ error?: string }>;
   setPhase: (phase: string) => Promise<{ error?: string }>;
   nextRound: () => Promise<{ error?: string }>;
@@ -54,6 +55,7 @@ interface GameContextType {
   vote: (targetId: string) => Promise<{ error?: string }>;
   playerRevealCard: (cardKey: string) => Promise<{ error?: string }>;
   playerHideCard: (cardKey: string) => Promise<{ error?: string }>;
+  funAction: (targetId: string, actionText: string) => Promise<{ error?: string }>;
 
   // Session persistence
   sessionRoomCode: string | null;
@@ -191,6 +193,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     return res;
   }, [emit, room]);
 
+  const endTurn = useCallback(async () => {
+    const res = await emit<{ error?: string }>('end_turn', { roomCode: room?.code });
+    return res;
+  }, [emit, room]);
+
   const nextPhase = useCallback(async () => {
     const res = await emit<{ error?: string }>('next_phase', { roomCode: room?.code });
     return res;
@@ -312,6 +319,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     return res;
   }, [emit, room]);
 
+  const funAction = useCallback(async (targetId: string, actionText: string) => {
+    const res = await emit<{ error?: string }>('fun_action', { roomCode: room?.code, targetId, actionText });
+    return res;
+  }, [emit, room]);
+
   const sendChat = useCallback((message: string) => {
     if (!message.trim() || !room) return;
     socket.emit('chat_message', { roomCode: room.code, message });
@@ -325,11 +337,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       room, isHost, myPlayerId, myPlayer,
       chatMessages, sendChat,
       createRoom, joinRoom, reconnectRoom,
-      startGame, nextPhase, setPhase, nextRound, setSpeaker,
+      startGame, endTurn, nextPhase, setPhase, nextRound, setSpeaker,
       startTimer, stopTimer, startVoting, endVoting,
       eliminatePlayer, restorePlayer, revealCard, hideCard, revealAllCards,
       updateSettings, changeCatastrophe, reassignCards, changeCardValue, undoLastAction, toggleHostParticipation, restartGame, kickPlayer,
-      vote, playerRevealCard, playerHideCard,
+      vote, playerRevealCard, playerHideCard, funAction,
       sessionRoomCode, sessionPlayerId, clearSession
     }}>
       {children}

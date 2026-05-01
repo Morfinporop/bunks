@@ -275,7 +275,8 @@ function getRoomState(roomCode) {
   const roomRow = db.prepare('SELECT * FROM rooms WHERE code = ?').get(roomCode);
   if (!roomRow) return null;
 
-  const players = db.prepare('SELECT * FROM players WHERE room_code = ?').all(roomCode);
+  // Keep stable player order by join sequence
+  const players = db.prepare('SELECT * FROM players WHERE room_code = ? ORDER BY rowid ASC').all(roomCode);
   const gameState = db.prepare('SELECT * FROM game_state WHERE room_code = ?').get(roomCode);
 
   return {
@@ -346,6 +347,48 @@ const io = new Server(httpServer, {
 
 const chatMessages = new Map(); // roomCode -> messages[]
 const undoStacks = new Map(); // roomCode -> actions[]
+
+function finalizeVotingForRoom(roomCode) {
+  const room = getRoomState(roomCode);
+  if (!room) return { ok: false, error: 'Комната не найдена' };
+
+  db.prepare('UPDATE game_state SET voting_active = 0 WHERE room_code = ?').run(roomCode);
+
+  const voteCounts = {};
+  Object.values(room.votes).forEach(targetId => {
+    voteCounts[targetId] = (voteCounts[targetId] || 0) + 1;
+  });
+
+  let eliminatedId = null;
+  let maxVotes = 0;
+  Object.entries(voteCounts).forEach(([pid, count]) => {
+    if (count > maxVotes) { maxVotes = count; eliminatedId = pid; }
+  });
+
+  if (eliminatedId) {
+    db.prepare('UPDATE players SET is_eliminated = 1 WHERE id = ?').run(eliminatedId);
+    const p = room.players.find(pl => pl.id === eliminatedId);
+    if (p) addLog(roomCode, `${p.name} исключён из бункера (${maxVotes} голосов)`);
+  }
+
+  const updatedRoom = getRoomState(roomCode);
+  const activePlayers = updatedRoom.players.filter(p => !p.isEliminated);
+
+  if (activePlayers.length <= room.settings.bunkerCapacity) {
+    db.prepare('UPDATE rooms SET phase = ? WHERE code = ?').run('results', roomCode);
+    addLog(roomCode, 'Игра завершена! Выжившие определены.');
+  } else {
+    // New turn cycle
+    db.prepare('UPDATE rooms SET phase = ? WHERE code = ?').run('game', roomCode);
+    db.prepare('UPDATE game_state SET votes = ?, current_speaker = ? WHERE room_code = ?')
+      .run('{}', activePlayers[0]?.id || null, roomCode);
+    db.prepare('UPDATE game_state SET timer_end_at = ?, timer_duration = ? WHERE room_code = ?')
+      .run(Date.now() + 120000, 120, roomCode);
+    addLog(roomCode, `Новый круг обсуждения. Ход: ${activePlayers[0]?.name || '—'}`);
+  }
+
+  return { ok: true, eliminatedId, voteCounts };
+}
 
 function pushUndo(roomCode, action) {
   if (!undoStacks.has(roomCode)) undoStacks.set(roomCode, []);
@@ -556,8 +599,48 @@ io.on('connection', (socket) => {
       db.prepare('UPDATE players SET cards = ? WHERE id = ?').run(JSON.stringify(cards), p.id);
     });
 
-    db.prepare('UPDATE rooms SET phase = ? WHERE code = ?').run('catastrophe', roomCode);
-    addLog(roomCode, 'Игра началась! Раскрывается катастрофа...');
+    const firstPlayer = room.players.find(p => !p.isEliminated);
+    db.prepare('UPDATE rooms SET phase = ? WHERE code = ?').run('game', roomCode);
+    db.prepare('UPDATE game_state SET current_speaker = ?, timer_end_at = ?, timer_duration = ?, voting_active = 0, votes = ? WHERE room_code = ?')
+      .run(firstPlayer?.id || null, Date.now() + 120000, 120, '{}', roomCode);
+    addLog(roomCode, `Игра началась! Первый ход: ${firstPlayer?.name || '—'}. Откройте профессию и одну характеристику.`);
+
+    io.to(roomCode).emit('room_updated', getPublicRoomState(roomCode));
+    io.to(room.hostId).emit('room_host_updated', getRoomState(roomCode));
+    callback({ success: true });
+  });
+
+  // ---- END TURN ----
+  socket.on('end_turn', ({ roomCode }, callback) => {
+    const room = getRoomState(roomCode);
+    if (!room) return callback({ error: 'Комната не найдена' });
+    if (room.phase !== 'game') return callback({ error: 'Сейчас не этап ходов' });
+
+    const actor = room.players.find(p => p.id === socket.id);
+    if (!actor) return callback({ error: 'Игрок не найден' });
+    if (actor.id !== room.currentSpeaker) return callback({ error: 'Сейчас не ваш ход' });
+    if (!actor.cards) return callback({ error: 'Карты не найдены' });
+
+    const revealed = Object.values(actor.cards).filter(c => c.revealed).length;
+    if (!actor.cards.profession.revealed || revealed < 2) {
+      return callback({ error: 'Нужно раскрыть Профессию и минимум еще 1 характеристику' });
+    }
+
+    const active = room.players.filter(p => !p.isEliminated);
+    const idx = active.findIndex(p => p.id === room.currentSpeaker);
+    const isLast = idx === active.length - 1;
+
+    if (isLast) {
+      db.prepare('UPDATE rooms SET phase = ? WHERE code = ?').run('voting', roomCode);
+      db.prepare('UPDATE game_state SET voting_active = 1, votes = ?, timer_end_at = NULL, timer_duration = NULL WHERE room_code = ?')
+        .run('{}', roomCode);
+      addLog(roomCode, 'Круг обсуждения завершен. Открыто голосование.');
+    } else {
+      const next = active[idx + 1];
+      db.prepare('UPDATE game_state SET current_speaker = ?, timer_end_at = ?, timer_duration = ? WHERE room_code = ?')
+        .run(next.id, Date.now() + 120000, 120, roomCode);
+      addLog(roomCode, `Ход завершен. Следующий: ${next.name}`);
+    }
 
     io.to(roomCode).emit('room_updated', getPublicRoomState(roomCode));
     io.to(room.hostId).emit('room_host_updated', getRoomState(roomCode));
@@ -698,44 +781,11 @@ io.on('connection', (socket) => {
   socket.on('end_voting', ({ roomCode }, callback) => {
     const room = requireHost(roomCode, callback);
     if (!room) return;
-    
-    db.prepare('UPDATE game_state SET voting_active = 0 WHERE room_code = ?').run(roomCode);
-
-    // Count votes
-    const voteCounts = {};
-    Object.values(room.votes).forEach(targetId => {
-      voteCounts[targetId] = (voteCounts[targetId] || 0) + 1;
-    });
-
-    let eliminatedId = null;
-    let maxVotes = 0;
-    Object.entries(voteCounts).forEach(([pid, count]) => {
-      if (count > maxVotes) { maxVotes = count; eliminatedId = pid; }
-    });
-
-    if (eliminatedId) {
-      db.prepare('UPDATE players SET is_eliminated = 1 WHERE id = ?').run(eliminatedId);
-      const p = room.players.find(pl => pl.id === eliminatedId);
-      if (p) addLog(roomCode, `${p.name} исключён из бункера (${maxVotes} голосов)`);
-    }
-
-    const updatedRoom = getRoomState(roomCode);
-    const activePlayers = updatedRoom.players.filter(p => !p.isEliminated);
-    
-    if (activePlayers.length <= room.settings.bunkerCapacity) {
-      db.prepare('UPDATE rooms SET phase = ? WHERE code = ?').run('results', roomCode);
-      addLog(roomCode, 'Игра завершена! Выжившие определены.');
-    } else {
-      db.prepare('UPDATE rooms SET phase = ? WHERE code = ?').run('game', roomCode);
-      const newRound = room.round + 1;
-      db.prepare('UPDATE rooms SET round = ? WHERE code = ?').run(newRound, roomCode);
-      db.prepare('UPDATE game_state SET current_speaker = ? WHERE room_code = ?')
-        .run(activePlayers[0]?.id || null, roomCode);
-    }
-
+    const result = finalizeVotingForRoom(roomCode);
+    if (!result.ok) return callback({ error: result.error || 'Ошибка подсчёта голосов' });
     io.to(roomCode).emit('room_updated', getPublicRoomState(roomCode));
     io.to(room.hostId).emit('room_host_updated', getRoomState(roomCode));
-    callback({ success: true, eliminatedId, voteCounts });
+    callback({ success: true, eliminatedId: result.eliminatedId, voteCounts: result.voteCounts });
   });
 
   // ---- ELIMINATE PLAYER ----
@@ -928,6 +978,16 @@ io.on('connection', (socket) => {
     
     db.prepare('UPDATE game_state SET votes = ? WHERE room_code = ?').run(JSON.stringify(votes), roomCode);
     addLog(roomCode, `${voter.name} проголосовал`);
+
+    const roomAfterVote = getRoomState(roomCode);
+    const activeCount = roomAfterVote.players.filter(p => !p.isEliminated).length;
+    if (Object.keys(roomAfterVote.votes).length >= activeCount) {
+      const result = finalizeVotingForRoom(roomCode);
+      if (!result.ok) return callback({ error: result.error || 'Ошибка подсчёта голосов' });
+      io.to(roomCode).emit('room_updated', getPublicRoomState(roomCode));
+      io.to(room.hostId).emit('room_host_updated', getRoomState(roomCode));
+      return callback({ success: true, finalized: true });
+    }
     
     io.to(roomCode).emit('room_updated', getPublicRoomState(roomCode));
     io.to(room.hostId).emit('room_host_updated', getRoomState(roomCode));
@@ -938,6 +998,10 @@ io.on('connection', (socket) => {
   socket.on('player_reveal_card', ({ roomCode, cardKey }, callback) => {
     const room = getRoomState(roomCode);
     if (!room) return callback({ error: 'Комната не найдена' });
+
+    if (room.phase === 'game' && room.currentSpeaker && room.currentSpeaker !== socket.id) {
+      return callback({ error: 'Сейчас ход другого игрока' });
+    }
     
     const p = room.players.find(pl => pl.id === socket.id);
     if (!p?.cards) return callback({ error: 'Карты не найдены' });
@@ -949,6 +1013,19 @@ io.on('connection', (socket) => {
     db.prepare('UPDATE players SET cards = ? WHERE id = ?').run(JSON.stringify(cards), socket.id);
     addLog(roomCode, `${p.name} раскрыл карту: ${cards[cardKey].label}`);
     
+    io.to(roomCode).emit('room_updated', getPublicRoomState(roomCode));
+    io.to(room.hostId).emit('room_host_updated', getRoomState(roomCode));
+    callback({ success: true });
+  });
+
+  // ---- FUN ACTION ----
+  socket.on('fun_action', ({ roomCode, targetId, actionText }, callback) => {
+    const room = getRoomState(roomCode);
+    if (!room) return callback({ error: 'Комната не найдена' });
+    const actor = room.players.find(p => p.id === socket.id);
+    const target = room.players.find(p => p.id === targetId);
+    if (!actor || !target) return callback({ error: 'Игрок не найден' });
+    addLog(roomCode, `🎭 ${actor.name}: ${actionText} -> ${target.name}`);
     io.to(roomCode).emit('room_updated', getPublicRoomState(roomCode));
     io.to(room.hostId).emit('room_host_updated', getRoomState(roomCode));
     callback({ success: true });
