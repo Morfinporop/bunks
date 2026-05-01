@@ -390,6 +390,9 @@ io.on('connection', (socket) => {
     try {
       if (!hostName?.trim()) return callback({ error: 'Введите ваше имя' });
 
+      // Clean previous player record for this socket to avoid UNIQUE id conflicts
+      db.prepare('DELETE FROM players WHERE id = ?').run(socket.id);
+
       let code;
       do { code = generateRoomCode(); } while (db.prepare('SELECT code FROM rooms WHERE code = ?').get(code));
 
@@ -442,6 +445,9 @@ io.on('connection', (socket) => {
   // ---- JOIN ROOM ----
   socket.on('join_room', ({ roomCode, playerName }, callback) => {
     try {
+      // Clean previous player record for this socket to avoid UNIQUE id conflicts
+      db.prepare('DELETE FROM players WHERE id = ?').run(socket.id);
+
       const code = roomCode?.toUpperCase().trim();
       const room = getRoomState(code);
       
